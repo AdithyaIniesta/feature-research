@@ -73,10 +73,37 @@ def main():
     gt = data["gt_bbox"]
     csrt = data["csrt_bbox"]
     area = gt[:, 2] * gt[:, 3]
+    aspect = gt[:, 2] / gt[:, 3]
     valid = ~np.isnan(area)
     norm_area = np.full_like(area, np.nan)
     if valid.any():
         norm_area[valid] = area[valid] / area[valid][0]
+
+    # --- characterize the sequence: how much scale / aspect actually change ---
+    if valid.any():
+        va = area[valid]
+        vasp = aspect[valid]
+        scale_ratio = float(va.max() / va.min())
+        aspect_ratio = float(vasp.max() / vasp.min())
+        print("\nSequence nature (from ground truth):")
+        print("  scale change : %.2fx area  (%.2fx linear size)"
+              % (scale_ratio, scale_ratio ** 0.5))
+        print("  aspect change: %.2fx (w/h from %.2f to %.2f)"
+              % (aspect_ratio, vasp.min(), vasp.max()))
+        if scale_ratio ** 0.5 < 1.5:
+            print("  --> LOW scale variation: this sequence does NOT test scale invariance well.")
+
+        # correlation of each block's GT similarity with scale and with aspect
+        def corr(a, b):
+            m = ~(np.isnan(a) | np.isnan(b))
+            if m.sum() < 3:
+                return float("nan")
+            return float(np.corrcoef(a[m], b[m])[0, 1])
+        print("\nCorrelation of block similarity with SCALE (norm_area) / ASPECT:")
+        for b in BLOCKS:
+            s = series[("gt", b)]
+            print("  %-7s  vs scale: %+0.2f   vs aspect: %+0.2f"
+                  % (b, corr(s, norm_area), corr(s, aspect)))
     ious = []
     for a, b in zip(csrt, gt):
         if np.isnan(a).any() or np.isnan(b).any():
