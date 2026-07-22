@@ -63,20 +63,42 @@ class Embedder:
     """embedder_legacy.onnx via onnxruntime, matching the tracker's preprocessing."""
     def __init__(self, onnx_path):
         import onnxruntime as ort
-        self.sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+        so = ort.SessionOptions()
+        so.intra_op_num_threads = 4      # avoids the pthread_setaffinity warning on Jetson
+        self.sess = ort.InferenceSession(onnx_path, sess_options=so,
+                                         providers=["CPUExecutionProvider"])
         self.in_name = self.sess.get_inputs()[0].name
         self.out_name = self.sess.get_outputs()[0].name
+        # is the batch dimension dynamic? (else we must run one crop at a time)
+        shp = self.sess.get_inputs()[0].shape
+        self.dynamic_batch = not isinstance(shp[0], int) or shp[0] < 1
 
-    def embed(self, crop_bgr):
+    def _blob(self, crop_bgr):
         gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
         gray = cv2.resize(gray, (INPUT, INPUT), interpolation=cv2.INTER_LINEAR)
         rgb = np.stack([gray, gray, gray], axis=-1).astype(np.float32) / 255.0
         rgb = (rgb - MEAN) / STD
-        blob = np.transpose(rgb, (2, 0, 1))[None].astype(np.float32)  # 1,3,128,128
-        out = self.sess.run([self.out_name], {self.in_name: blob})[0]
+        return np.transpose(rgb, (2, 0, 1)).astype(np.float32)  # 3,128,128
+
+    def embed(self, crop_bgr):
+        out = self.sess.run([self.out_name], {self.in_name: self._blob(crop_bgr)[None]})[0]
         v = out.flatten().astype(np.float64)
         n = np.linalg.norm(v)
         return v / n if n > 0 else v
+
+    def embed_batch(self, crops_bgr):
+        """Return L2-normalized embeddings (N, D). Batches if the model allows it."""
+        blobs = np.stack([self._blob(c) for c in crops_bgr])  # (N,3,128,128)
+        if self.dynamic_batch:
+            out = self.sess.run([self.out_name], {self.in_name: blobs})[0]
+        else:
+            out = np.stack([self.sess.run([self.out_name],
+                                          {self.in_name: b[None]})[0].flatten()
+                            for b in blobs])
+        out = out.reshape(len(crops_bgr), -1).astype(np.float64)
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return out / norms
 
 
 def resample(cimg, s):

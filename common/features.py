@@ -87,6 +87,25 @@ class ResNet18Blocks:
         return F.adaptive_avg_pool2d(x, 1).flatten().cpu().numpy()
 
     @torch.no_grad()
+    def block2_vectors(self, crops_bgr):
+        """Batched block2 GAP vectors for a list of crops -> np.array(N, C). Much faster
+        than calling block2_vector N times (single forward pass)."""
+        import cv2
+        ts = []
+        for c in crops_bgr:
+            rgb = cv2.cvtColor(c, cv2.COLOR_BGR2RGB)
+            rgb = cv2.resize(rgb, (self.input_size, self.input_size),
+                             interpolation=cv2.INTER_LINEAR)
+            t = torch.from_numpy(rgb).float().permute(2, 0, 1) / 255.0
+            ts.append(_NORM(t))
+        x = torch.stack(ts).to(self.device)
+        n = self.net
+        x = n.maxpool(n.relu(n.bn1(n.conv1(x))))
+        x = n.layer1(x)
+        x = n.layer2(x)
+        return F.adaptive_avg_pool2d(x, 1).flatten(1).cpu().numpy()
+
+    @torch.no_grad()
     def block_vectors(self, crop_bgr):
         """Global-average-pooled feature vector per block -> dict block -> np.array(C,)."""
         maps = self.block_maps(crop_bgr)

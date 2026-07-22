@@ -29,34 +29,46 @@ import sys
 
 import cv2
 import numpy as np
+import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common.features import ResNet18Blocks, cosine   # noqa: E402
+from common.features import ResNet18Blocks, cosine   # noqa: E402,F401
 from common.geom import crop                          # noqa: E402
 from embedder.embedder_scale import Embedder, load_gt  # noqa: E402
+
+torch.set_num_threads(4)
 
 DATA_BASE = "/home/nvidia/Downloads/Dataset_UAV123/UAV123/data_seq/UAV123"
 POS_STEPS = 5
 SCALES = [0.85, 1.0, 1.18]
 
 
-def search(frame, box, template_vec, embed_fn):
-    """Local multi-scale search; return (best_box, best_cosine)."""
+def candidates(frame, box):
+    """Return (list_of_crops, list_of_boxes) for a local multi-scale search."""
     x, y, w, h = box
     cx, cy = x + w / 2.0, y + h / 2.0
-    best, best_s = box, -1.0
+    crops, boxes = [], []
     for sf in SCALES:
         nw, nh = w * sf, h * sf
         for dx in np.linspace(-0.4, 0.4, POS_STEPS) * w:
             for dy in np.linspace(-0.4, 0.4, POS_STEPS) * h:
                 nb = [cx + dx - nw / 2.0, cy + dy - nh / 2.0, nw, nh]
                 c = crop(frame, nb, pad=0.15)
-                if c is None or c.size == 0:
-                    continue
-                s = cosine(template_vec, embed_fn(c))
-                if s > best_s:
-                    best_s, best = s, nb
-    return [int(round(v)) for v in best], best_s
+                if c is not None and c.size:
+                    crops.append(c)
+                    boxes.append([int(round(v)) for v in nb])
+    return crops, boxes
+
+
+def best_box(template_vec, cand_vecs, boxes, fallback):
+    """cand_vecs: (N,D) L2-normalizable; pick argmax cosine to template."""
+    if not boxes:
+        return fallback, -1.0
+    t = template_vec / (np.linalg.norm(template_vec) + 1e-8)
+    v = cand_vecs / (np.linalg.norm(cand_vecs, axis=1, keepdims=True) + 1e-8)
+    sims = v @ t
+    j = int(np.argmax(sims))
+    return boxes[j], float(sims[j])
 
 
 def main():
@@ -77,8 +89,6 @@ def main():
 
     ext = ResNet18Blocks(device="cpu")
     emb = Embedder(args.onnx)
-    resnet_fn = ext.block2_vector
-    embed_fn = emb.embed
 
     start = args.start if args.start is not None else \
         (next((i for i, b in enumerate(gt) if b), 0) if (args.gt_template and gt) else 0)
@@ -96,8 +106,8 @@ def main():
         tbox = [int(v) for v in roi]
 
     tcrop = crop(tframe, tbox, pad=0.15)
-    t_res = resnet_fn(tcrop)
-    t_emb = embed_fn(tcrop)
+    t_res = ext.block2_vectors([tcrop])[0]
+    t_emb = emb.embed(tcrop)
     box_res = list(tbox)
     box_emb = list(tbox)
 
@@ -119,8 +129,16 @@ def main():
         frame = cv2.imread(frames[i])
         if frame is None:
             break
-        box_res, s_res = search(frame, box_res, t_res, resnet_fn)
-        box_emb, s_emb = search(frame, box_emb, t_emb, embed_fn)
+        cr_res, bx_res = candidates(frame, box_res)
+        if cr_res:
+            box_res, s_res = best_box(t_res, ext.block2_vectors(cr_res), bx_res, box_res)
+        else:
+            s_res = -1.0
+        cr_emb, bx_emb = candidates(frame, box_emb)
+        if cr_emb:
+            box_emb, s_emb = best_box(t_emb, emb.embed_batch(cr_emb), bx_emb, box_emb)
+        else:
+            s_emb = -1.0
 
         disp = frame.copy()
         x, y, w, h = box_res
