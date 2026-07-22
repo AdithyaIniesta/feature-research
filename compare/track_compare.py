@@ -78,6 +78,9 @@ def main():
     ap.add_argument("--gt-template", action="store_true")
     ap.add_argument("--record", action="store_true")
     ap.add_argument("--start", type=int, default=None, help="start/template frame index")
+    ap.add_argument("--fuse-weight", type=float, default=0.6,
+                    help="fused score = w*embedder + (1-w)*block2 (higher w = trust "
+                         "identity more). Blue box.")
     args = ap.parse_args()
 
     seq_dir = os.path.join(DATA_BASE, args.seq)
@@ -110,6 +113,11 @@ def main():
     t_emb = emb.embed(tcrop)
     box_res = list(tbox)
     box_emb = list(tbox)
+    box_fus = list(tbox)
+    w = args.fuse_weight
+
+    def norm_rows(M):
+        return M / (np.linalg.norm(M, axis=1, keepdims=True) + 1e-8)
 
     writer = None
     out_path = None
@@ -140,15 +148,29 @@ def main():
         else:
             s_emb = -1.0
 
+        # fused: same candidates scored by w*embedder + (1-w)*block2 cosine
+        cr_fus, bx_fus = candidates(frame, box_fus)
+        s_fus = -1.0
+        if cr_fus:
+            e = norm_rows(emb.embed_batch(cr_fus)) @ (t_emb / (np.linalg.norm(t_emb) + 1e-8))
+            r = norm_rows(ext.block2_vectors(cr_fus)) @ (t_res / (np.linalg.norm(t_res) + 1e-8))
+            fused = w * e + (1.0 - w) * r
+            j = int(np.argmax(fused))
+            box_fus, s_fus = bx_fus[j], float(fused[j])
+
         disp = frame.copy()
-        x, y, w, h = box_res
-        cv2.rectangle(disp, (x, y), (x + w, y + h), (0, 230, 0), 2)      # GREEN resnet
-        x, y, w, h = box_emb
-        cv2.rectangle(disp, (x, y), (x + w, y + h), (0, 0, 230), 2)      # RED embedder
+        bx, by, bw, bh = box_res
+        cv2.rectangle(disp, (bx, by), (bx + bw, by + bh), (0, 230, 0), 2)   # GREEN resnet
+        bx, by, bw, bh = box_emb
+        cv2.rectangle(disp, (bx, by), (bx + bw, by + bh), (0, 0, 230), 2)   # RED embedder
+        bx, by, bw, bh = box_fus
+        cv2.rectangle(disp, (bx, by), (bx + bw, by + bh), (255, 150, 0), 2)  # BLUE fused
         cv2.putText(disp, "ResNet block2  cos=%.2f" % s_res, (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 0), 2)
         cv2.putText(disp, "Embedder       cos=%.2f" % s_emb, (10, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 230), 2)
+        cv2.putText(disp, "Fused (w=%.1f)  cos=%.2f" % (w, s_fus), (10, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 150, 0), 2)
         cv2.putText(disp, "frame %d" % i, (10, disp.shape[0] - 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
@@ -162,7 +184,7 @@ def main():
             if key == ord(' '):
                 paused = not paused
             if key in (ord('r'), ord('R')):
-                box_res, box_emb = list(tbox), list(tbox)
+                box_res, box_emb, box_fus = list(tbox), list(tbox), list(tbox)
         except cv2.error:
             pass  # headless: no display, just record
 
