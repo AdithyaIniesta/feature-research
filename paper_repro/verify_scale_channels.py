@@ -91,6 +91,19 @@ class Taps:
         post_c = pre_c + in_c                 # pre-ReLU sum
         return (in_c.cpu().numpy(), pre_c.cpu().numpy(), post_c.cpu().numpy())
 
+    def max_vectors(self, layer):
+        """Return (in, pre, post) per-channel MAX-over-space vectors (feature presence).
+
+        Post is the pre-ReLU residual sum; we take spatial max of the summed map so we
+        detect the channel's feature wherever it appears, not just at the image center.
+        """
+        inn = self.buf["in_" + layer][0]     # (C,H,W)
+        pre = self.buf["pre_" + layer][0]
+        post = pre + inn
+        return (inn.amax(dim=(1, 2)).cpu().numpy(),
+                pre.amax(dim=(1, 2)).cpu().numpy(),
+                post.amax(dim=(1, 2)).cpu().numpy())
+
 
 def pearson(x, y):
     m = ~(np.isnan(x) | np.isnan(y))
@@ -101,14 +114,31 @@ def pearson(x, y):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--images", required=True, help="folder of natural images")
-    ap.add_argument("--n", type=int, default=100)
+    ap.add_argument("--images", help="single folder of images (less diverse)")
+    ap.add_argument("--data-root", help="UAV123 data_seq/UAV123 dir: sample across MANY "
+                    "sequences for diversity (recommended)")
+    ap.add_argument("--per-seq", type=int, default=6, help="frames per sequence when --data-root")
+    ap.add_argument("--n", type=int, default=300)
     args = ap.parse_args()
 
-    files = sorted(glob.glob(os.path.join(args.images, "*.jpg"))) or \
-        sorted(glob.glob(os.path.join(args.images, "*.png")))
+    files = []
+    if args.data_root:
+        seqs = sorted(d for d in os.listdir(args.data_root)
+                      if os.path.isdir(os.path.join(args.data_root, d)))
+        for s in seqs:
+            fs = sorted(glob.glob(os.path.join(args.data_root, s, "*.jpg"))) or \
+                sorted(glob.glob(os.path.join(args.data_root, s, "*.png")))
+            if fs:
+                idx = np.linspace(0, len(fs) - 1, min(args.per_seq, len(fs))).astype(int)
+                files += [fs[i] for i in idx]
+        print("Sampled %d frames across %d sequences (diverse)." % (len(files), len(seqs)))
+    elif args.images:
+        files = sorted(glob.glob(os.path.join(args.images, "*.jpg"))) or \
+            sorted(glob.glob(os.path.join(args.images, "*.png")))
+    else:
+        ap.error("give --data-root (recommended) or --images")
     if not files:
-        print("No images in", args.images); return 1
+        print("No images found."); return 1
     if len(files) > args.n:
         files = [files[i] for i in np.linspace(0, len(files) - 1, args.n).astype(int)]
     print("Using %d images." % len(files))
@@ -130,7 +160,7 @@ def main():
                 x = scale_transform(s)(img).unsqueeze(0)
                 model(x)
                 for L in layers:
-                    ic, pc, poc = taps.center_vectors(L)
+                    ic, pc, poc = taps.max_vectors(L)   # feature presence anywhere in frame
                     inn[L][s].append(ic); pre[L][s].append(pc); post[L][s].append(poc)
             if (fi + 1) % 25 == 0:
                 print("  %d/%d" % (fi + 1, len(files)))
