@@ -1,8 +1,8 @@
 """Experiment 2: Feature stability vs scale.
 
-For a set of target crops taken from the session (using tracker boxes), rescale each
-crop to several scale factors, extract ResNet18 block1..block4 features, and measure
-cosine similarity of each scaled version against the 1.0x reference.
+Target crops are taken from ANGLE events (dense per-frame tracker boxes), mapped to the
+correct jpg by timestamp. Each crop is rescaled to several factors; ResNet18 block1..4
+features are compared (cosine) against the 1.0x reference.
 
 Output: which block holds up best as the target changes size.
   results/exp02/scale_stability.csv
@@ -33,26 +33,22 @@ def rescale(img, s):
     return cv2.resize(img, (nw, nh), interpolation=interp)
 
 
-def sample_targets(sess, cam, max_targets, min_size=16):
-    """Pick frames where a tracker box exists for `cam`, evenly spaced."""
-    frames = sorted(int(f) for f, r in sess.tracker.items()
-                    if isinstance(r, dict) and r.get(cam))
-    frames = [f for f in frames
-              if (sess.tracker_box(cam, f)[2] >= min_size
-                  and sess.tracker_box(cam, f)[3] >= min_size)]
-    if not frames:
+def sample_targets(sess, side, max_targets, min_size=16):
+    angles = [a for a in sess.angle_events(side)
+              if a["box"][2] >= min_size and a["box"][3] >= min_size]
+    if not angles:
         return []
-    if len(frames) > max_targets:
-        idx = np.linspace(0, len(frames) - 1, max_targets).astype(int)
-        frames = [frames[i] for i in idx]
-    return frames
+    if len(angles) > max_targets:
+        idx = np.linspace(0, len(angles) - 1, max_targets).astype(int)
+        angles = [angles[i] for i in idx]
+    return angles
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--session", required=True)
     ap.add_argument("--cam", default="left", choices=["left", "right"])
-    ap.add_argument("--max-targets", type=int, default=40)
+    ap.add_argument("--max-targets", type=int, default=60)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -64,34 +60,34 @@ def main():
     sess = Session(args.session)
     ext = ResNet18Blocks(device="cpu")
 
-    frames = sample_targets(sess, args.cam, args.max_targets)
-    if not frames:
-        print("No usable tracker targets found for cam=%s" % args.cam)
+    targets = sample_targets(sess, args.cam, args.max_targets)
+    if not targets:
+        print("No usable ANGLE targets found for cam=%s" % args.cam)
         return
-    print("Using %d target frames." % len(frames))
+    print("Using %d target crops (cam=%s, from ANGLE events)." % (len(targets), args.cam))
 
-    # sims[block][scale] = list of cosine sims across targets
     sims = {b: {s: [] for s in SCALES} for b in BLOCKS}
-
-    for fi, fr in enumerate(frames):
-        box = sess.tracker_box(args.cam, fr)
+    used = 0
+    for ti, a in enumerate(targets):
+        idx = sess.index_for_time(args.cam, a["t_ns"])
         try:
-            img = sess.read_frame(args.cam, fr)
+            img = sess.read_frame(args.cam, idx)
         except FileNotFoundError:
             continue
-        base = crop(img, box, pad=0.15)
+        base = crop(img, a["box"], pad=0.15)
         if base is None or base.shape[0] < 8 or base.shape[1] < 8:
             continue
-        ref = ext.block_vectors(base)  # 1.0x reference
+        ref = ext.block_vectors(base)
         for s in SCALES:
-            scaled = rescale(base, s)
-            vec = ext.block_vectors(scaled)
+            vec = ext.block_vectors(rescale(base, s))
             for b in BLOCKS:
                 sims[b][s].append(cosine(ref[b], vec[b]))
-        if (fi + 1) % 10 == 0:
-            print("  processed %d/%d" % (fi + 1, len(frames)))
+        used += 1
+        if used % 15 == 0:
+            print("  processed %d/%d" % (used, len(targets)))
 
-    # --- write CSV -------------------------------------------------------
+    print("Crops actually used: %d" % used)
+
     csv_path = os.path.join(out_dir, "scale_stability.csv")
     with open(csv_path, "w") as f:
         f.write("block,scale,mean_cosine,std_cosine,n\n")
@@ -104,7 +100,6 @@ def main():
                         % (b, s, arr.mean(), arr.std(), arr.size))
     print("Wrote", csv_path)
 
-    # --- plot ------------------------------------------------------------
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -116,7 +111,7 @@ def main():
         plt.axvline(1.0, color="gray", ls="--", lw=1)
         plt.xlabel("scale factor")
         plt.ylabel("mean cosine similarity vs 1.0x")
-        plt.title("Feature stability vs scale (ResNet18 blocks)")
+        plt.title("Feature stability vs scale (ResNet18 blocks, n=%d)" % used)
         plt.legend()
         plt.grid(True, alpha=0.3)
         png = os.path.join(out_dir, "scale_stability.png")
@@ -125,7 +120,6 @@ def main():
     except Exception as e:
         print("Plot skipped:", e)
 
-    # --- verdict ---------------------------------------------------------
     print("\nMost scale-invariant block (higher = better, avg over non-1.0 scales):")
     ranking = []
     for b in BLOCKS:
