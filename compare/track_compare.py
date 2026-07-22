@@ -78,10 +78,19 @@ def main():
     ap.add_argument("--gt-template", action="store_true")
     ap.add_argument("--record", action="store_true")
     ap.add_argument("--start", type=int, default=None, help="start/template frame index")
+    ap.add_argument("--end", type=int, default=None, help="stop at this frame (exclusive)")
+    ap.add_argument("--frame-step", type=int, default=1, help="process every Nth frame")
+    ap.add_argument("--fast", action="store_true",
+                    help="27 candidates instead of 75 (3x faster, coarser)")
     ap.add_argument("--fuse-weight", type=float, default=0.6,
                     help="fused score = w*embedder + (1-w)*block2 (higher w = trust "
                          "identity more). Blue box.")
     args = ap.parse_args()
+
+    global POS_STEPS, SCALES
+    if args.fast:
+        POS_STEPS = 3
+        SCALES = [0.9, 1.0, 1.1]
 
     seq_dir = os.path.join(DATA_BASE, args.seq)
     frames = sorted(glob.glob(os.path.join(seq_dir, "*.jpg"))) or \
@@ -130,10 +139,11 @@ def main():
         writer, out_path = open_writer(os.path.join(out_dir, "track_%s.mp4" % args.seq),
                                        12, w0, h0)
 
-    show = not args.record or True  # still show if display available
     paused = False
     i = start
-    while i < len(frames):
+    end = args.end if args.end is not None else len(frames)
+    end = min(end, len(frames))
+    while i < end:
         frame = cv2.imread(frames[i])
         if frame is None:
             break
@@ -189,7 +199,7 @@ def main():
             pass  # headless: no display, just record
 
         if not paused:
-            i += 1
+            i += max(1, args.frame_step)
 
     if writer is not None:
         writer.release()
