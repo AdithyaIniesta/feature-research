@@ -77,6 +77,16 @@ class ResNet18Blocks:
         return out
 
     @torch.no_grad()
+    def block2_vector(self, crop_bgr):
+        """Fast: GAP feature vector after layer2 only (skips layer3/4). For live search."""
+        x = self._prep(crop_bgr)
+        n = self.net
+        x = n.maxpool(n.relu(n.bn1(n.conv1(x))))
+        x = n.layer1(x)
+        x = n.layer2(x)
+        return F.adaptive_avg_pool2d(x, 1).flatten().cpu().numpy()
+
+    @torch.no_grad()
     def block_vectors(self, crop_bgr):
         """Global-average-pooled feature vector per block -> dict block -> np.array(C,)."""
         maps = self.block_maps(crop_bgr)
