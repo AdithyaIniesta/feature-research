@@ -56,6 +56,27 @@ class ResNet18Blocks:
         return out
 
     @torch.no_grad()
+    def maps_at(self, img_bgr, size):
+        """Run the net on img resized to (size,size); return dict block -> tensor(1,C,h,w).
+
+        Unlike block_maps (which pools to a vector), this keeps the SPATIAL feature map,
+        needed for correlation-based localization. `size` should be a multiple of 32.
+        """
+        import cv2
+        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        rgb = cv2.resize(rgb, (size, size), interpolation=cv2.INTER_LINEAR)
+        t = torch.from_numpy(rgb).float().permute(2, 0, 1) / 255.0
+        t = _NORM(t).unsqueeze(0).to(self.device)
+        n = self.net
+        x = n.maxpool(n.relu(n.bn1(n.conv1(t))))
+        out = {}
+        x = n.layer1(x); out["block1"] = x
+        x = n.layer2(x); out["block2"] = x
+        x = n.layer3(x); out["block3"] = x
+        x = n.layer4(x); out["block4"] = x
+        return out
+
+    @torch.no_grad()
     def block_vectors(self, crop_bgr):
         """Global-average-pooled feature vector per block -> dict block -> np.array(C,)."""
         maps = self.block_maps(crop_bgr)
