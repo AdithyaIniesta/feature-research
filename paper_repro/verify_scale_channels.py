@@ -202,10 +202,35 @@ def main():
         print("  overlap of paper's %d channels with the top-%d most stable: %d (%.0f%%)"
               % (len(inv), len(inv), hit, 100.0 * hit / len(inv)))
 
+        # --- paper-faithful metric: measure_scale_inv on each channel's OWN top image ---
+        # For channel c, pick the image that most activates it at scale 1, then check how
+        # well its Post activation is PRESERVED across scales (clip>=0, /max, mean).
+        # High = scale-invariant (activation survives scaling), matching the paper.
+        p1 = post[L][1.0]
+        pres = np.full(C, np.nan)
+        for c in range(C):
+            bi = int(np.argmax(p1[:, c]))
+            vals = np.clip(np.array([post[L][s][bi, c] for s in SCALES]), 0, None)
+            mx = vals.max()
+            if mx > 0:
+                pres[c] = float((vals / mx).mean())
+        inv_pres = pres[inv][~np.isnan(pres[inv])]
+        oth_pres = pres[others][~np.isnan(pres[others])]
+        order2 = np.argsort(-np.nan_to_num(pres, nan=-1))
+        hit2 = len(set(order2[:len(inv)].tolist()) & set(inv.tolist()))
+        print("  [paper-faithful] scale preservation on each channel's top image:")
+        print("     paper channels = %.3f   others = %.3f   (%s, %+.3f)"
+              % (inv_pres.mean(), oth_pres.mean(),
+                 "MORE" if inv_pres.mean() > oth_pres.mean() else "LESS",
+                 inv_pres.mean() - oth_pres.mean()))
+        print("     overlap with top-%d most preserved: %d (%.0f%%)"
+              % (len(inv), hit2, 100.0 * hit2 / len(inv)))
+
         with open(os.path.join(out_dir, "verify_%s.csv" % L), "w") as fcsv:
-            fcsv.write("channel,cross_scale_stability,is_paper_scale_inv\n")
+            fcsv.write("channel,cross_scale_stability,top_image_preservation,is_paper_scale_inv\n")
             for c in range(C):
-                fcsv.write("%d,%.4f,%d\n" % (c, stab[c], int(c in set(SCALE_INV[L]))))
+                fcsv.write("%d,%.4f,%.4f,%d\n"
+                           % (c, stab[c], pres[c], int(c in set(SCALE_INV[L]))))
 
         # mechanism plot: In-small / Pre-large / Post-flat for a few top scale-inv channels
         try:
