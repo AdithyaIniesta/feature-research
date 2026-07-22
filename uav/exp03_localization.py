@@ -182,6 +182,20 @@ def main():
         print("  %-8s mean=%.3f  median=%.3f  success<0.5=%.0f%%"
               % (m, e.mean(), np.median(e), 100.0 * (e < 0.5).mean()))
 
+    # scale-stratified: this is the decisive comparison -- who wins WHERE
+    sc = np.array([r["scale"] for r in rows])
+    regimes = [("near-scale (0.8-1.5x)", (sc >= 0.8) & (sc < 1.5)),
+               ("mid-scale (1.5-2.5x)", (sc >= 1.5) & (sc < 2.5)),
+               ("high-scale (>=2.5x)", sc >= 2.5)]
+    print("\nMedian error by scale regime (LOWER = better; n = frames in regime):")
+    print("  %-22s %6s " % ("regime", "n") + " ".join("%8s" % m for m in methods))
+    for name, mask in regimes:
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        meds = [np.median(np.array([r[m] for r in rows])[mask]) for m in methods]
+        print("  %-22s %6d " % (name, n) + " ".join("%8.3f" % v for v in meds))
+
     # binned by scale
     try:
         import matplotlib
